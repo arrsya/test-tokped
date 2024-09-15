@@ -55,7 +55,7 @@ async function scrapeTokopediaShop(shopUrl) {
   const $ = cheerio.load((await retryRequest(shopUrl)).data);
   const results = [];
 
-  $('.css-54k5sq').slice(0, 5).each((_, element) => {
+  $('.css-54k5sq').each((_, element) => {
     const $el = $(element);
     results.push({
       productTitle: $el.find('[data-testid="linkProductName"]').text().trim(),
