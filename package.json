@@ -4,8 +4,8 @@
   "description": "untuk scrape data dari tokopedia",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "start": "node index.js"
+},
   "keywords": [
     "tokopedia",
     "scap"
