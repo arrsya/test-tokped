@@ -183,7 +183,14 @@ app.get('/', (req, res) => {
   });
 });
 
-// Start the server
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`);
-});
+// Ubah bagian akhir file
+// Hapus app.listen() dan ganti dengan module.exports
+module.exports = app;
+
+// Tambahkan kondisi untuk menjalankan server saat di-develop secara lokal
+if (process.env.NODE_ENV !== 'production') {
+  const port = process.env.PORT || 3002;
+  app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
+  });
+}
