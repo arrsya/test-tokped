@@ -29,6 +29,13 @@ const retryRequest = async (url, retries = 3, delayMs = 1000) => {
   }
 };
 
+// Add this helper function at the top of the file
+const logExecutionTime = (start, operation) => {
+  const end = process.hrtime.bigint();
+  const executionTime = Number(end - start) / 1e6; // Convert nanoseconds to milliseconds
+  console.log(`${operation} completed in ${executionTime.toFixed(2)} ms (${(executionTime / 1000).toFixed(2)} seconds)`);
+};
+
 async function scrapeProductDetail(productUrl) {
   const response = await retryRequest(productUrl);
   const html = response.data;
@@ -86,7 +93,7 @@ async function scrapeTokopediaShop(shopUrl) {
   const shopLocation = $('[data-testid="shopLocationHeader"]').text().trim();
 
   // Get product data from shop's etalase
-  $('.css-54k5sq').each((i, element) => {
+  $('.css-54k5sq').slice(0, 10).each((i, element) => {
     const productTitle = $(element).find('[data-testid="linkProductName"]').text().trim();
     const productPrice = $(element).find('[data-testid="linkProductPrice"]').text().trim();
     const productImage = $(element).find('[data-testid="imgProduct"]').attr('src');
@@ -108,12 +115,30 @@ async function scrapeTokopediaShop(shopUrl) {
     });
   });
 
-  for (const product of results) {
+  // Use Promise.all with a timeout
+  const timeout = ms => new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms));
+  const productPromises = results.map(product => {
     if (product.productLink) {
-      const detailData = await scrapeProductDetail(product.productLink);
-      Object.assign(product, detailData);
+      return Promise.race([
+        scrapeProductDetail(product.productLink)
+          .then(detailData => Object.assign(product, detailData))
+          .catch(error => {
+            console.error(`Error fetching details for ${product.productLink}:`, error);
+            return product;
+          }),
+        timeout(4000) // 4 second timeout for each product
+      ]);
     }
-  }
+    return Promise.resolve(product);
+  });
+
+  const completedProducts = await Promise.allSettled(productPromises);
+  results.length = 0;
+  completedProducts.forEach(result => {
+    if (result.status === 'fulfilled') {
+      results.push(result.value);
+    }
+  });
 
   return {
     shopName,
@@ -122,6 +147,10 @@ async function scrapeTokopediaShop(shopUrl) {
   };
 }
 
+// Implement caching with a shorter duration
+const cache = new Map();
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
 // API endpoint
 app.get('/api/tokopedia-shop', async (req, res) => {
   const shopUrl = req.query.url;
@@ -129,12 +158,22 @@ app.get('/api/tokopedia-shop', async (req, res) => {
     return res.status(400).json({ error: 'Shop URL is required' });
   }
 
+  const start = process.hrtime.bigint();
+
   try {
-    const data = await scrapeTokopediaShop(shopUrl);
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Request timeout')), 4900)
+    );
+    const dataPromise = scrapeTokopediaShop(shopUrl);
+    
+    const data = await Promise.race([dataPromise, timeoutPromise]);
+    cache.set(shopUrl, { data, timestamp: Date.now() });
     res.json(data);
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while scraping the shop' });
+  } finally {
+    logExecutionTime(start, 'Shop scraping');
   }
 });
 
@@ -145,12 +184,17 @@ app.get('/api/tokopedia-product', async (req, res) => {
     return res.status(400).json({ error: 'Product URL is required' });
   }
 
+  const start = process.hrtime.bigint();
+
   try {
     const data = await scrapeProductDetail(productUrl);
+    cache.set(productUrl, { data, timestamp: Date.now() });
     res.json(data);
   } catch (error) {
     console.error('Error:', error);
     res.status(500).json({ error: 'An error occurred while scraping the product' });
+  } finally {
+    logExecutionTime(start, 'Product scraping');
   }
 });
 
