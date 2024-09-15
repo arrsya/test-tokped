@@ -1,4 +1,4 @@
-# Tokopedia Scraper API
+# JKT48 TOKOPEDIA SCRAPPER
 
 ## Overview
 This is a simple API for scraping product and shop information from Tokopedia.
