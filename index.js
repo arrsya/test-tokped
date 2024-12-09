@@ -10,13 +10,41 @@ app.use(compression());
 const cache = new Map();
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
-const retryRequest = async (url, retries = 2, delayMs = 500) => {
+// Simple concurrency control
+class ConcurrencyLimit {
+  constructor(limit) {
+    this.limit = limit;
+    this.running = 0;
+    this.queue = [];
+  }
+
+  async run(fn) {
+    if (this.running >= this.limit) {
+      await new Promise(resolve => this.queue.push(resolve));
+    }
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      if (this.queue.length > 0) {
+        const next = this.queue.shift();
+        next();
+      }
+    }
+  }
+}
+
+const limit = new ConcurrencyLimit(5);
+
+// Reduce timeout and retries
+const retryRequest = async (url, retries = 1, delayMs = 300) => {
   if (!url) throw new Error('Invalid URL: URL is undefined');
   for (let i = 0; i < retries; i++) {
     try {
       return await axios.get(url, {
         headers: {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'},
-        timeout: 5000 // 5 second timeout
+        timeout: 3000 // Reduce timeout to 3 seconds
       });
     } catch (error) {
       if (i === retries - 1) throw error;
@@ -25,10 +53,13 @@ const retryRequest = async (url, retries = 2, delayMs = 500) => {
   }
 };
 
+// Optimize scrapeProductDetail to only fetch necessary data
 async function scrapeProductDetail(productUrl) {
   const $ = cheerio.load((await retryRequest(productUrl)).data);
   
+  // Get only first 5 images
   const productImages = $('[data-testid="PDPImageThumbnail"] img')
+    .slice(0, 5)
     .map((_, el) => {
       const src = $(el).attr('src');
       return src && !src.includes('svg') ? src.replace('100-square', '500-square') : null;
@@ -42,7 +73,7 @@ async function scrapeProductDetail(productUrl) {
   return {
     productTitle: $('h1[data-testid="lblPDPDetailProductName"]').text().trim(),
     productPrice: $('div[data-testid="lblPDPDetailProductPrice"]').text().trim(),
-    productImages,
+    productImages: productImages.slice(0, 5), // Limit to 5 images
     productDescription: $('div[data-testid="lblPDPDescriptionProduk"]').text().trim(),
     sizeInfo: {
       count: $('.css-hayuji [data-testid^="btnVariantChip"] button').length.toString(),
@@ -57,7 +88,8 @@ async function scrapeTokopediaShop(shopUrl) {
   const $ = cheerio.load((await retryRequest(shopUrl)).data);
   const results = [];
 
-  $('.css-54k5sq').each((_, element) => {
+  // Limit to first 20 products for faster response
+  $('.css-54k5sq').slice(0, 20).each((_, element) => {
     const $el = $(element);
     results.push({
       productTitle: $el.find('[data-testid="linkProductName"]').text().trim(),
@@ -71,18 +103,21 @@ async function scrapeTokopediaShop(shopUrl) {
     });
   });
 
+  // Use our custom concurrent limiting for product detail fetching
   const productDetails = await Promise.all(
-    results.map(async product => {
+    results.map(product => {
       if (product.productLink) {
-        try {
-          const details = await scrapeProductDetail(product.productLink);
-          return { ...product, ...details };
-        } catch (error) {
-          console.error(`Error fetching details for ${product.productLink}:`, error);
-          return product;
-        }
+        return limit.run(async () => {
+          try {
+            const details = await scrapeProductDetail(product.productLink);
+            return { ...product, ...details };
+          } catch (error) {
+            console.error(`Error fetching details for ${product.productLink}:`, error);
+            return product;
+          }
+        });
       }
-      return product;
+      return Promise.resolve(product);
     })
   );
 
