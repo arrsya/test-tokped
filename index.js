@@ -37,18 +37,45 @@ class ConcurrencyLimit {
 
 const limit = new ConcurrencyLimit(5);
 
-// Reduce timeout and retries
-const retryRequest = async (url, retries = 1, delayMs = 300) => {
+// Adjust the retry settings and add proxy support
+const retryRequest = async (url, retries = 2, delayMs = 1000) => {
   if (!url) throw new Error('Invalid URL: URL is undefined');
+  
+  const options = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+    },
+    timeout: 10000, // Increase timeout to 10 seconds
+    maxRedirects: 5,
+    validateStatus: function (status) {
+      return status >= 200 && status < 303; // Accept redirects
+    }
+  };
+
   for (let i = 0; i < retries; i++) {
     try {
-      return await axios.get(url, {
-        headers: {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'},
-        timeout: 3000 // Reduce timeout to 3 seconds
-      });
+      const response = await axios.get(url, options);
+      if (response.status === 200) {
+        return response;
+      }
+      throw new Error(`Invalid status code: ${response.status}`);
     } catch (error) {
-      if (i === retries - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, delayMs));
+      console.error(`Attempt ${i + 1}/${retries} failed for ${url}:`, error.message);
+      
+      if (i === retries - 1) {
+        throw error;
+      }
+      
+      // Exponential backoff
+      const waitTime = delayMs * Math.pow(2, i);
+      console.log(`Waiting ${waitTime}ms before retry...`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
 };
@@ -85,65 +112,81 @@ async function scrapeProductDetail(productUrl) {
 }
 
 async function scrapeTokopediaShop(shopUrl) {
-  const $ = cheerio.load((await retryRequest(shopUrl)).data);
-  const results = [];
+  try {
+    const response = await retryRequest(shopUrl);
+    const $ = cheerio.load(response.data);
+    const results = [];
 
-  // Limit to first 20 products for faster response
-  $('.css-54k5sq').slice(0, 20).each((_, element) => {
-    const $el = $(element);
-    results.push({
-      productTitle: $el.find('[data-testid="linkProductName"]').text().trim(),
-      productPrice: $el.find('[data-testid="linkProductPrice"]').text().trim(),
-      productImage: $el.find('[data-testid="imgProduct"]').attr('src'),
-      productLink: $el.find('a').attr('href'),
-      productStatus: $el.find('.css-1bqlscy').text().trim(),
-      productRating: $el.find('.prd_rating-average-text').text().trim(),
-      productSold: $el.find('.prd_label-integrity').text().trim(),
-      productCampaign: $el.find('[aria-label="campaign"]').text().trim()
+    // Limit to first 10 products for faster response and reliability
+    $('.css-54k5sq').slice(0, 10).each((_, element) => {
+      const $el = $(element);
+      results.push({
+        productTitle: $el.find('[data-testid="linkProductName"]').text().trim(),
+        productPrice: $el.find('[data-testid="linkProductPrice"]').text().trim(),
+        productImage: $el.find('[data-testid="imgProduct"]').attr('src'),
+        productLink: $el.find('a').attr('href'),
+        productStatus: $el.find('.css-1bqlscy').text().trim(),
+        productRating: $el.find('.prd_rating-average-text').text().trim(),
+        productSold: $el.find('.prd_label-integrity').text().trim(),
+        productCampaign: $el.find('[aria-label="campaign"]').text().trim()
+      });
     });
-  });
 
-  // Use our custom concurrent limiting for product detail fetching
-  const productDetails = await Promise.all(
-    results.map(product => {
-      if (product.productLink) {
-        return limit.run(async () => {
-          try {
-            const details = await scrapeProductDetail(product.productLink);
-            return { ...product, ...details };
-          } catch (error) {
-            console.error(`Error fetching details for ${product.productLink}:`, error);
-            return product;
+    // Process products in smaller batches
+    const batchSize = 3;
+    const productDetails = [];
+    
+    for (let i = 0; i < results.length; i += batchSize) {
+      const batch = results.slice(i, i + batchSize);
+      const batchResults = await Promise.all(
+        batch.map(product => {
+          if (product.productLink) {
+            return limit.run(async () => {
+              try {
+                const details = await scrapeProductDetail(product.productLink);
+                return { ...product, ...details };
+              } catch (error) {
+                console.error(`Error fetching details for ${product.productLink}:`, error.message);
+                return product;
+              }
+            });
           }
-        });
-      }
-      return Promise.resolve(product);
-    })
-  );
+          return Promise.resolve(product);
+        })
+      );
+      productDetails.push(...batchResults);
+    }
 
-  return {
-    shopName: $('[data-testid="shopNameHeader"]').text().trim(),
-    shopLocation: $('[data-testid="shopLocationHeader"]').text().trim(),
-    products: productDetails
-  };
+    return {
+      shopName: $('[data-testid="shopNameHeader"]').text().trim(),
+      shopLocation: $('[data-testid="shopLocationHeader"]').text().trim(),
+      products: productDetails
+    };
+  } catch (error) {
+    console.error('Error in scrapeTokopediaShop:', error.message);
+    throw new Error(`Failed to scrape shop: ${error.message}`);
+  }
 }
 
 app.get('/api/tokopedia-shop', async (req, res) => {
   const shopUrl = req.query.url;
   if (!shopUrl) return res.status(400).json({ error: 'Shop URL is required' });
 
-  const cachedData = cache.get(shopUrl);
-  if (cachedData && Date.now() - cachedData.timestamp < CACHE_DURATION) {
-    return res.json(cachedData.data);
-  }
-
   try {
+    const cachedData = cache.get(shopUrl);
+    if (cachedData && Date.now() - cachedData.timestamp < CACHE_DURATION) {
+      return res.json(cachedData.data);
+    }
+
     const data = await scrapeTokopediaShop(shopUrl);
     cache.set(shopUrl, { data, timestamp: Date.now() });
     res.json(data);
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: 'An error occurred while scraping the shop' });
+    console.error('Error in /api/tokopedia-shop:', error);
+    res.status(error.response?.status || 500).json({ 
+      error: 'An error occurred while scraping the shop',
+      message: error.message
+    });
   }
 });
 
