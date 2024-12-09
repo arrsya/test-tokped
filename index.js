@@ -45,8 +45,10 @@ async function scrapeProductDetail(productUrl) {
     productImages,
     productDescription: $('div[data-testid="lblPDPDescriptionProduk"]').text().trim(),
     sizeInfo: {
-      count: $('[data-testid="pdpVariantTitle#0"]').text().trim().match(/(\d+)\s*size/i)?.[1] || "N/A",
-      sizes: $('.css-hayuji [data-testid="btnVariantChipInactive"] button').map((_, el) => $(el).text().trim()).get()
+      count: $('.css-hayuji [data-testid^="btnVariantChip"] button').length.toString(),
+      sizes: $('.css-hayuji [data-testid^="btnVariantChip"] button')
+        .map((_, el) => $(el).text().trim())
+        .get()
     }
   };
 }
